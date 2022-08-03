@@ -166,7 +166,6 @@ impl RDMAChannelIntern {
             {
                 *self.status.lock() = ChannelStatus::CLOSED;
                 if *self.closeRequestedByClient.lock() {
-                    debug!("finSent, ReleaseChannelResource");
                     self.ReleaseChannelResource();
                 }
             } else {
@@ -331,7 +330,7 @@ impl RDMAChannelIntern {
                 }
             }
 
-            debug!("ProcessRDMARecvWriteImm 7");
+            // debug!("ProcessRDMARecvWriteImm 7");
             self.agent.SendResponse(RDMAResp {
                 user_data: 0,
                 msg: RDMARespMsg::RDMAFinNotify(RDMAFinNotifyResp {

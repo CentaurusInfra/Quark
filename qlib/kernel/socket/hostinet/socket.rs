@@ -339,7 +339,7 @@ impl SocketOperations {
                         *self.socketBuf.lock() = SocketBufType::RDMA(rdmaSocket.socketBuf.clone());
                     }
                     _ => {
-                        panic!("Incorrect sockInfo")
+                        panic!("PostConnect, Incorrect sockInfo: {:?}", sockInfo);
                     }
                 }
             }
@@ -835,7 +835,9 @@ impl SockOperations for SocketOperations {
                     let port = ipv4.Port.to_le();
                     //TODO: get local ip and port
                     let srcPort = 16866u16.to_be();
-                    let _ret = GlobalRDMASvcCli().connectUsingPodId(self.fd as u32, ipAddr, port, srcPort);
+                    let rdmaId = GlobalRDMASvcCli().nextRDMAId.fetch_add(1, Ordering::Release);
+                    GlobalRDMASvcCli().rdmaIdToSocketMappings.lock().insert(rdmaId, self.fd);
+                    let _ret = GlobalRDMASvcCli().connectUsingPodId(rdmaId, ipAddr, port, srcPort);
                     let socketBuf = self.SocketBufType().Connect();
                     *self.socketBuf.lock() = socketBuf.clone();
                     res = -SysErr::EINPROGRESS;
@@ -1090,16 +1092,17 @@ impl SockOperations for SocketOperations {
             match socketInfo {
                 SockInfo::Socket(info) => {
                     port = info.port;
-                    //TODO: should handle listen 0.0.0.0
-                    let rdmaSocket = RDMAServerSock::New(self.fd, acceptQueue.clone(), info.ipAddr, info.port);
+                    let rdmaId = GlobalRDMASvcCli().nextRDMAId.fetch_add(1, Ordering::Release);
+                    GlobalRDMASvcCli().rdmaIdToSocketMappings.lock().insert(rdmaId, self.fd);
+                    let rdmaSocket = RDMAServerSock::New(rdmaId, acceptQueue.clone(), info.ipAddr, info.port);
                     *fdInfo.lock().sockInfo.lock() = SockInfo::RDMAServerSocket(rdmaSocket);
+                    debug!("Listen, rdmaId: {}, serverSockFd: {}", rdmaId, self.fd);
+                    let _ret = GlobalRDMASvcCli().listenUsingPodId(rdmaId, port, backlog);
                 }
                 _ => {
                     panic!("RDMA Listen with wrong state");
                 }
             }
-
-            let _ret = GlobalRDMASvcCli().listenUsingPodId(self.fd as u32, port, backlog);
             0
         } else {
             Kernel::HostSpace::Listen(self.fd, backlog, asyncAccept)
@@ -1276,6 +1279,9 @@ impl SockOperations for SocketOperations {
     }
 
     fn SetSockOpt(&self, task: &Task, level: i32, name: i32, opt: &[u8]) -> Result<i64> {
+        if self.enableRDMA {
+            return Ok(0);
+        }
         /*let optlen = match level as u64 {
             LibcConst::SOL_IPV6 => {
                 match name as u64 {
@@ -1312,6 +1318,7 @@ impl SockOperations for SocketOperations {
 
         let opt = &opt[..optlen];*/
 
+        debug!("SocketOperations::SetSockOpt 1");
         if (level as u64) == LibcConst::SOL_SOCKET && (name as u64) == LibcConst::SO_SNDTIMEO {
             if opt.len() >= SocketSize::SIZEOF_TIMEVAL {
                 let timeVal = task.CopyInObj::<Timeval>(&opt[0] as *const _ as u64)?;
@@ -1322,6 +1329,7 @@ impl SockOperations for SocketOperations {
             }
         }
 
+        debug!("SocketOperations::SetSockOpt 2");
         if (level as u64) == LibcConst::SOL_SOCKET && (name as u64) == LibcConst::SO_RCVTIMEO {
             if opt.len() >= SocketSize::SIZEOF_TIMEVAL {
                 let timeVal = task.CopyInObj::<Timeval>(&opt[0] as *const _ as u64)?;
@@ -1332,6 +1340,7 @@ impl SockOperations for SocketOperations {
             }
         }
 
+        debug!("SocketOperations::SetSockOpt 3");
         // TCP_INQ is bound to buffer implementation
         if (level as u64) == LibcConst::SOL_TCP && (name as u64) == LibcConst::TCP_INQ {
             let val = unsafe { *(&opt[0] as *const _ as u64 as *const i32) };
@@ -1360,10 +1369,12 @@ impl SockOperations for SocketOperations {
                 optLen as u32,
             )
         };
+        debug!("SocketOperations::SetSockOpt 4");
 
         if res < 0 {
             return Err(Error::SysError(-res as i32));
         }
+        debug!("SocketOperations::SetSockOpt 5");
 
         return Ok(res);
     }
